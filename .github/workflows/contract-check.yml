@@ -1,0 +1,313 @@
+name: Contract Check
+
+# One PR comment covering every contract the PR can break:
+#   - HTTP API: Logto's runtime OpenAPI spec (/api/swagger.json), compared with oasdiff.
+#   - TypeScript public API of published workspace packages, compared with
+#     api-extractor doc models and classified by .github/contract-check/symbol_diff.py.
+# Each check only runs when the PR touches code that can change that contract.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/core/**'
+      - 'packages/schemas/**'
+      - 'packages/phrases/**'
+      - 'packages/toolkit/**'
+      - 'packages/shared/**'
+      - '.github/workflows/contract-check.yml'
+      - '.github/contract-check/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  OASDIFF_VERSION: v1.35.0
+  API_EXTRACTOR_VERSION: 7.59.4
+  # Published packages whose public TypeScript API is checked. @logto/schemas is left
+  # out: it exports `./lib/*`, so consumers can deep-import any file and a single
+  # entry-point report would miss most of its surface.
+  SYMBOL_PACKAGES: >-
+    packages/toolkit/connector-kit
+    packages/toolkit/core-kit
+    packages/toolkit/language-kit
+    packages/shared
+
+jobs:
+  refs:
+    runs-on: ubuntu-latest
+    outputs:
+      base: ${{ steps.mb.outputs.base }}
+      head: ${{ github.event.pull_request.head.sha }}
+      api: ${{ steps.detect.outputs.api }}
+      kits: ${{ steps.detect.outputs.kits }}
+      packages: ${{ steps.detect.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: mb
+        name: Resolve merge-base (not the tip of the base branch)
+        run: |
+          base=$(git merge-base "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          echo "merge-base: $base"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - id: detect
+        name: Decide which contract checks this PR needs
+        run: |
+          changed=$(git diff --name-only "${{ steps.mb.outputs.base }}" "${{ github.event.pull_request.head.sha }}")
+          echo "$changed"
+
+          # The HTTP spec is built from core routes, schemas (zod guards) and phrases.
+          api=false
+          if echo "$changed" | grep -qE '^packages/(core|schemas|phrases)/'; then api=true; fi
+
+          # Only packages whose non-test sources changed.
+          kits=""; packages=""
+          for dir in $SYMBOL_PACKAGES; do
+            if echo "$changed" | grep -E "^$dir/src/" | grep -qvE '\.test\.tsx?$'; then
+              kits="$kits $dir"
+              packages="$packages,$(jq -r .name "$dir/package.json")=$dir"
+            fi
+          done
+          echo "api=$api" >> "$GITHUB_OUTPUT"
+          echo "kits=${kits# }" >> "$GITHUB_OUTPUT"
+          echo "packages=${packages#,}" >> "$GITHUB_OUTPUT"
+          echo "### Contract checks" >> "$GITHUB_STEP_SUMMARY"
+          echo "- HTTP API (oasdiff): $api" >> "$GITHUB_STEP_SUMMARY"
+          echo "- TypeScript API (api-extractor): ${kits:- none}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- HTTP API
+  spec:
+    needs: refs
+    if: needs.refs.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        side: [base, head]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI: true
+      PUPPETEER_SKIP_DOWNLOAD: true
+      DB_URL: postgres://postgres:postgres@localhost:5432/postgres
+      DEV_FEATURES_ENABLED: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.side == 'base' && needs.refs.outputs.base || needs.refs.outputs.head }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm i --frozen-lockfile
+      - name: Build core and CLI (with their workspace deps)
+        run: pnpm --filter "@logto/core..." --filter "@logto/cli..." build
+      - name: Seed database
+        run: pnpm cli db seed --swe
+      - name: Start core and fetch swagger.json
+        run: |
+          (cd packages/core && NODE_ENV=production node . > ../../core.log 2>&1 &)
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:3001/api/status >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:3001/api/swagger.json -o openapi-${{ matrix.side }}.json \
+            || { echo '--- core.log ---'; cat core.log; exit 1; }
+          jq '{openapi, paths: (.paths | length)}' openapi-${{ matrix.side }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi-${{ matrix.side }}
+          path: openapi-${{ matrix.side }}.json
+
+  oasdiff:
+    needs: [refs, spec]
+    if: needs.refs.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: openapi-*
+          merge-multiple: true
+      - name: Install oasdiff (CLI only; no hosted service)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$OASDIFF_VERSION" -R oasdiff/oasdiff -p '*linux_amd64.tar.gz' -O oasdiff.tgz
+          tar -xzf oasdiff.tgz oasdiff
+          sudo mv oasdiff /usr/local/bin/
+      - name: Run oasdiff
+        run: |
+          oasdiff changelog openapi-base.json openapi-head.json -f json > changelog.json
+          oasdiff changelog openapi-base.json openapi-head.json -f markdown > changelog.md
+          jq 'group_by(.level) | map({level: .[0].level, count: length})' changelog.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oasdiff-findings
+          path: |
+            changelog.json
+            changelog.md
+            openapi-base.json
+            openapi-head.json
+
+  # ---------------------------------------------------- TypeScript public API
+  symbols:
+    needs: refs
+    if: needs.refs.outputs.kits != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        side: [base, head]
+    env:
+      CI: true
+      PUPPETEER_SKIP_DOWNLOAD: true
+      KITS: ${{ needs.refs.outputs.kits }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.side == 'base' && needs.refs.outputs.base || needs.refs.outputs.head }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm i --frozen-lockfile
+      - run: npm i -g "@microsoft/api-extractor@$API_EXTRACTOR_VERSION"
+      - name: Build packages and extract their public API
+        run: |
+          out="$GITHUB_WORKSPACE/api-out"
+          mkdir -p "$out"
+          for dir in $KITS; do
+            if [ ! -f "$dir/package.json" ]; then echo "$dir does not exist on this side"; continue; fi
+            name=$(jq -r .name "$dir/package.json"); slug=$(basename "$dir")
+            pnpm --filter "$name..." build
+            # Generated per run so the check needs no config committed in each package.
+            # Messages are silenced: we want the model and report, not API-hygiene lint.
+            cat > "$dir/api-extractor.ci.json" <<EOF
+          {
+            "projectFolder": ".",
+            "mainEntryPointFilePath": "<projectFolder>/lib/index.d.ts",
+            "compiler": { "tsconfigFilePath": "<projectFolder>/tsconfig.json" },
+            "apiReport": { "enabled": true, "reportFileName": "$slug", "reportFolder": "$out/", "reportTempFolder": "$out/tmp/" },
+            "docModel": { "enabled": true, "apiJsonFilePath": "$out/$slug.api.json" },
+            "dtsRollup": { "enabled": false },
+            "tsdocMetadata": { "enabled": false },
+            "messages": {
+              "compilerMessageReporting": { "default": { "logLevel": "none" } },
+              "extractorMessageReporting": { "default": { "logLevel": "none" } },
+              "tsdocMessageReporting": { "default": { "logLevel": "none" } }
+            }
+          }
+          EOF
+            (cd "$dir" && api-extractor run --local --config api-extractor.ci.json) || true
+            # Older api-extractor versions write the report without the .api.md suffix.
+            if [ -f "$out/$slug" ]; then mv "$out/$slug" "$out/$slug.api.md"; fi
+            if [ ! -f "$out/$slug.api.json" ]; then
+              echo "::error::api-extractor produced no doc model for $name"; exit 1
+            fi
+          done
+          rm -rf "$out/tmp"
+          ls -la "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: api-${{ matrix.side }}
+          path: api-out/
+
+  # ----------------------------------------------------------- one PR comment
+  report:
+    needs: [refs, oasdiff, symbols]
+    if: always() && needs.refs.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.refs.outputs.head }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: in
+      - name: Normalise findings and render the report
+        id: render
+        env:
+          API: ${{ needs.refs.outputs.api }}
+          KITS: ${{ needs.refs.outputs.kits }}
+          OASDIFF_RESULT: ${{ needs.oasdiff.result }}
+          SYMBOLS_RESULT: ${{ needs.symbols.result }}
+          PACKAGES: ${{ needs.refs.outputs.packages }}
+        run: |
+          s=.github/contract-check
+          mkdir -p out out/diffs
+
+          api_status=skipped
+          if [ "$API" = true ]; then
+            if [ "$OASDIFF_RESULT" = success ]; then api_status=success; else api_status=failure; fi
+          fi
+          sym_status=skipped
+          if [ -n "$KITS" ]; then
+            if [ "$SYMBOLS_RESULT" = success ]; then sym_status=success; else sym_status=failure; fi
+          fi
+
+          [ "$api_status" = success ] && python3 $s/oasdiff_findings.py in/oasdiff-findings/changelog.json > out/api-findings.json
+
+          echo '[]' > out/symbol-findings.json
+          if [ "$sym_status" = success ]; then
+            for head in in/api-head/*.api.json; do
+              slug=$(basename "$head" .api.json)
+              base="in/api-base/$slug.api.json"; [ -f "$base" ] || base=-
+              name=$(jq -r .name "$head")
+              python3 $s/symbol_diff.py "$name" "$base" "$head" > "out/sym-$slug.json"
+              if [ -f "in/api-base/$slug.api.md" ]; then
+                diff -u --label "base/$slug.api.md" --label "head/$slug.api.md" \
+                  "in/api-base/$slug.api.md" "in/api-head/$slug.api.md" > "out/diffs/$slug.api.md.diff" || true
+              fi
+            done
+            jq -s 'add // []' out/sym-*.json > out/symbol-findings.json
+          fi
+
+          python3 $s/render_report.py --out out/report.md --verdict out/verdict.txt \
+            --api "$api_status" --api-findings out/api-findings.json --api-tool "oasdiff $OASDIFF_VERSION" \
+            --symbols "$sym_status" --symbol-findings out/symbol-findings.json \
+            --symbol-tool "api-extractor $API_EXTRACTOR_VERSION" \
+            --packages "$PACKAGES" --diffs out/diffs --repo .
+          cat out/report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "blocking=$(cat out/verdict.txt)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contract-findings
+          path: out/
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          id=$(gh api "repos/$GH_REPO/issues/$PR/comments" --paginate \
+            -q '.[] | select(.body | startswith("<!-- contract-report -->")) | .id' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" -F body=@out/report.md >/dev/null
+          else
+            gh pr comment "$PR" --body-file out/report.md
+          fi
+      - name: Fail on breaking changes
+        if: steps.render.outputs.blocking != '0'
+        run: |
+          echo "::error::Contract check found ${{ steps.render.outputs.blocking }} blocking item(s). See the PR comment."
+          exit 1
