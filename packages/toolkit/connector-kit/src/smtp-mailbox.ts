@@ -18,7 +18,7 @@ export const sanitizeMailboxDisplayName = (name: string): string =>
 export const sanitizeMailboxAddress = (address: string): string =>
   stripHeaderControlChars(address).replaceAll('<', '').replaceAll('>', '').trim();
 
-export const formatMailbox = (email: string, name?: string): string => {
+export const formatMailbox = (email: string, name: string): string => {
   const sanitizedEmail = sanitizeMailboxAddress(email);
   if (!name) {
     return sanitizedEmail;
