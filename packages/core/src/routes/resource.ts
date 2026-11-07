@@ -1,7 +1,7 @@
 import { isManagementApi, ProductEvent, Resources, Scopes } from '@logto/schemas';
 import { generateStandardId } from '@logto/shared';
 import { yes } from '@silverhand/essentials';
-import { boolean, object, string } from 'zod';
+import { object, string } from 'zod';
 
 import RequestError from '#src/errors/RequestError/index.js';
 import koaGuard from '#src/middleware/koa-guard.js';
@@ -30,7 +30,6 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
       findAllResources,
       findResourceById,
       findResourceByIndicator,
-      setDefaultResource,
       insertResource,
       updateResourceById,
       deleteResourceById,
@@ -162,27 +161,6 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
 
       const resource = await updateResourceById(id, body);
       ctx.body = resource;
-
-      return next();
-    }
-  );
-
-  router.patch(
-    '/resources/:id/is-default',
-    koaGuard({
-      params: object({ id: string().min(1) }),
-      body: object({ isDefault: boolean() }),
-      response: Resources.guard,
-      status: [200, 404],
-    }),
-    async (ctx, next) => {
-      const {
-        params: { id },
-        body: { isDefault },
-      } = ctx.guard;
-
-      // Only 0 or 1 default resource is allowed per tenant, so use a dedicated transaction query for setting the default.
-      ctx.body = await (isDefault ? setDefaultResource(id) : updateResourceById(id, { isDefault }));
 
       return next();
     }
