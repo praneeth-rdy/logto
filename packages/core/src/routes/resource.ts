@@ -144,7 +144,11 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
       params: object({ id: string().min(1) }),
       // Intentionally omit `isDefault` since it'll affect other rows.
       // Use the dedicated API `PATCH /resources/:id/is-default` to update.
-      body: Resources.createGuard.omit({ id: true, indicator: true, isDefault: true }).partial(),
+      body: Resources.createGuard
+        .omit({ id: true, indicator: true, isDefault: true })
+        .partial()
+        // `name` must always be sent so the console never clears it by omission.
+        .required({ name: true }),
       response: Resources.guard,
       status: [200, 400, 404],
     }),
