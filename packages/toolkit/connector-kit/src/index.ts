@@ -176,7 +176,9 @@ export const getAccessTokenByRefreshToken = async (
 
 export function getConfigTemplateByType<Template extends { usageType: string }>(
   type: string,
-  config: { templates?: Template[] }
+  config: { templates?: Template[] },
+  /** The template type to fall back to when no template matches `type`. */
+  fallbackType: string = TemplateType.Generic
 ): Template | undefined {
   const { templates } = config;
 
@@ -186,6 +188,6 @@ export function getConfigTemplateByType<Template extends { usageType: string }>(
 
   return (
     templates.find((template) => template.usageType === type) ??
-    templates.find((template) => template.usageType === TemplateType.Generic)
+    templates.find((template) => template.usageType === fallbackType)
   );
 }
