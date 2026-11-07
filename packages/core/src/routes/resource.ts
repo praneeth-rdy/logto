@@ -44,7 +44,6 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
     koaGuard({
       query: object({
         includeScopes: string().optional(),
-        excludeManagementApis: string().optional(),
       }),
       response: Resources.guard.extend({ scopes: Scopes.guard.array().optional() }).array(),
       status: [200],
@@ -52,9 +51,10 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
     async (ctx, next) => {
       const { limit, offset, disabled } = ctx.pagination;
       const {
-        query: { includeScopes, excludeManagementApis },
+        query: { includeScopes },
       } = ctx.guard;
-      const shouldExcludeManagementApis = yes(excludeManagementApis);
+      // Management API resources are always excluded now.
+      const shouldExcludeManagementApis = true;
 
       if (disabled) {
         const resources = await findAllResources(shouldExcludeManagementApis);
