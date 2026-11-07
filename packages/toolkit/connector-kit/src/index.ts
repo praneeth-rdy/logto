@@ -7,7 +7,6 @@ import {
   ConnectorErrorCodes,
   type SendMessagePayload,
   ConnectorType,
-  TemplateType,
   jsonGuard,
   jsonObjectGuard,
   tokenResponseGuard,
@@ -173,19 +172,3 @@ export const getAccessTokenByRefreshToken = async (
     throw error;
   }
 };
-
-export function getConfigTemplateByType<Template extends { usageType: string }>(
-  type: string,
-  config: { templates?: Template[] }
-): Template | undefined {
-  const { templates } = config;
-
-  if (!templates) {
-    return;
-  }
-
-  return (
-    templates.find((template) => template.usageType === type) ??
-    templates.find((template) => template.usageType === TemplateType.Generic)
-  );
-}
