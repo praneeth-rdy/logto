@@ -112,8 +112,12 @@ export const replaceSendMessageHandlebars = (
   });
 };
 
-export const getValue = (object: Record<string, unknown>, path: string): unknown | undefined => {
-  return path.split('.').reduce<unknown | undefined>((current, part) => {
+export const getValue = (
+  object: Record<string, unknown>,
+  path: string,
+  separator = '.'
+): unknown | undefined => {
+  return path.split(separator).reduce<unknown | undefined>((current, part) => {
     // Return undefined if the current value is not an object
     if (!current || typeof current !== 'object') {
       return;
