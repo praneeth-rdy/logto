@@ -126,7 +126,8 @@
           }
         },
         "summary": "Set API resource as default",
-        "description": "Set an API resource as the default resource for the current tenant.\n\nEach tenant can have only one default API resource. If an API resource is set as default, the previously set default API resource will be set as non-default. See [this section](https://docs.logto.io/docs/references/resources/#default-api) for more information."
+        "description": "Set an API resource as the default resource for the current tenant.\n\nEach tenant can have only one default API resource. If an API resource is set as default, the previously set default API resource will be set as non-default. See [this section](https://docs.logto.io/docs/references/resources/#default-api) for more information.\n\nDeprecated: use `PATCH /api/resources/{id}` instead.",
+        "deprecated": true
       }
     },
     "/api/resources/{resourceId}/scopes": {
