@@ -66,7 +66,7 @@
           }
         },
         "summary": "Get API resource",
-        "description": "Get an API resource details by ID."
+        "description": "Get an API resource by ID, including its indicator, token TTL and default flag."
       },
       "patch": {
         "requestBody": {
