@@ -108,7 +108,7 @@ export const replaceSendMessageHandlebars = (
 
     const value = getValue(payload, key);
 
-    return String(value ?? '');
+    return String(value ?? '').trim();
   });
 };
 
