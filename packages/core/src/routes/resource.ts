@@ -123,15 +123,25 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
     '/resources/:id',
     koaGuard({
       params: object({ id: string().min(1) }),
-      response: Resources.guard,
+      query: object({ includeScopes: string().optional() }),
+      response: Resources.guard.extend({ scopes: Scopes.guard.array().optional() }),
       status: [200, 404],
     }),
     async (ctx, next) => {
       const {
         params: { id },
+        query: { includeScopes },
       } = ctx.guard;
 
       const resource = await findResourceById(id);
+
+      if (yes(includeScopes)) {
+        const [resourceWithScopes] = await attachScopesToResources([resource], scopeQueries);
+        ctx.body = resourceWithScopes;
+
+        return next();
+      }
+
       ctx.body = resource;
 
       return next();

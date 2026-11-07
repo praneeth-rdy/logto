@@ -60,6 +60,13 @@
     },
     "/api/resources/{id}": {
       "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "includeScopes",
+            "description": "If it's provided with a truthy value (`true`, `1`, `yes`), the scopes of the resource will be included in the response."
+          }
+        ],
         "responses": {
           "200": {
             "description": "The requested resource."
