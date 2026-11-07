@@ -196,6 +196,25 @@ def deprecated(m):
     return '@deprecated' in (m.get('docComment') or '')
 
 
+def describe_type_change(old, new, limit=160):
+    """Short types are shown whole; long ones (e.g. inferred zod types) as added/removed parts."""
+    if len(old) + len(new) <= limit:
+        return f"the type changed from `{old}` to `{new}`"
+
+    def parts(t):
+        return [p.strip(' {}') for p in re.split(r'[;,]\s*', t) if p.strip(' {}')]
+
+    o, n = parts(old), parts(new)
+    added = list(dict.fromkeys(p for p in n if p not in o))
+    removed = list(dict.fromkeys(p for p in o if p not in n))
+    bits = []
+    if added:
+        bits.append('added ' + ', '.join(f'`{p}`' for p in added[:4]) + (' …' if len(added) > 4 else ''))
+    if removed:
+        bits.append('removed ' + ', '.join(f'`{p}`' for p in removed[:4]) + (' …' if len(removed) > 4 else ''))
+    return 'the type changed: ' + ('; '.join(bits) if bits else 'members reordered or reformatted')
+
+
 # --- rules -----------------------------------------------------------------------
 
 def compare_params(old, new, emit):
@@ -296,7 +315,7 @@ def diff(package, base, head):
         elif o_obj is not None and n_obj is not None:
             compare_objects(o_obj, n_obj, emit)
         elif n['kind'] not in CONTAINER_KINDS and type_text(o) != type_text(n):
-            emit('WARN', 'type-changed', f"the type changed from `{type_text(o)}` to `{type_text(n)}`")
+            emit('WARN', 'type-changed', describe_type_change(type_text(o), type_text(n)))
         if len(findings) == before and n['kind'] not in CONTAINER_KINDS:
             emit('WARN', 'signature-changed', f"the declaration changed: `{excerpt(o)}` → `{excerpt(n)}`")
 
