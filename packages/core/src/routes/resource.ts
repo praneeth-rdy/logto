@@ -87,7 +87,7 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
       // Use the dedicated API `PATCH /resources/:id/is-default` to update.
       body: Resources.createGuard.omit({ id: true, isDefault: true }),
       response: Resources.guard.extend({ scopes: Scopes.guard.array().optional() }),
-      status: [201, 422],
+      status: [200, 422],
     }),
     koaReportSubscriptionUpdates({
       key: 'resourcesLimit',
@@ -111,7 +111,7 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
         ...body,
       });
 
-      ctx.status = 201;
+      ctx.status = 200;
       ctx.body = { ...resource, scopes: [] };
 
       captureEvent({ tenantId, request: ctx.req }, ProductEvent.ApiResourceCreated);
