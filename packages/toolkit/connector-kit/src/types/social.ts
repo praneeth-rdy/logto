@@ -60,6 +60,8 @@ export const jsonObjectGuard = z.record(jsonGuard);
 export type SocialUserInfo = {
   id: string;
   email?: string;
+  /** Whether the provider has verified `email`. */
+  emailVerified: boolean;
   phone?: string;
   name?: string;
   avatar?: string;
@@ -69,6 +71,7 @@ export type SocialUserInfo = {
 export const socialUserInfoGuard = z.object({
   id: z.string(),
   email: z.string().optional(),
+  emailVerified: z.boolean(),
   phone: z.string().optional(),
   name: z.string().optional(),
   avatar: z.string().optional(),
