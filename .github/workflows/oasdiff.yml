@@ -1,0 +1,176 @@
+name: OpenAPI Diff
+
+# Generates the Logto Management API spec (served at /api/swagger.json) at the PR's
+# merge-base and head, then compares them with oasdiff. Logto assembles its spec at
+# runtime from koa-guard (zod) definitions plus *.openapi.json supplements, so there is
+# no static spec file to diff: we boot core against a throwaway Postgres on each side.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/core/**'
+      - 'packages/schemas/**'
+      - 'packages/phrases/**'
+      - '.github/workflows/oasdiff.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  OASDIFF_VERSION: v1.35.0
+
+jobs:
+  refs:
+    runs-on: ubuntu-latest
+    outputs:
+      base: ${{ steps.mb.outputs.base }}
+      head: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: mb
+        name: Resolve merge-base (not the tip of the base branch)
+        run: |
+          base=$(git merge-base "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          echo "merge-base: $base"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+  spec:
+    needs: refs
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        side: [base, head]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI: true
+      PUPPETEER_SKIP_DOWNLOAD: true
+      DB_URL: postgres://postgres:postgres@localhost:5432/postgres
+      DEV_FEATURES_ENABLED: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.side == 'base' && needs.refs.outputs.base || needs.refs.outputs.head }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm i --frozen-lockfile
+
+      - name: Build core and CLI (with their workspace deps)
+        run: pnpm --filter "@logto/core..." --filter "@logto/cli..." build
+
+      - name: Seed database
+        run: pnpm cli db seed --swe
+
+      - name: Start core and fetch swagger.json
+        run: |
+          (cd packages/core && NODE_ENV=production node . > ../../core.log 2>&1 &)
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:3001/api/status >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:3001/api/swagger.json -o openapi-${{ matrix.side }}.json \
+            || { echo '--- core.log ---'; cat core.log; exit 1; }
+          jq '{openapi, paths: (.paths | length)}' openapi-${{ matrix.side }}.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi-${{ matrix.side }}
+          path: openapi-${{ matrix.side }}.json
+
+  diff:
+    needs: spec
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: openapi-*
+          merge-multiple: true
+
+      - name: Install oasdiff (CLI only; no hosted service)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$OASDIFF_VERSION" -R oasdiff/oasdiff -p '*linux_amd64.tar.gz' -O oasdiff.tgz
+          tar -xzf oasdiff.tgz oasdiff
+          sudo mv oasdiff /usr/local/bin/
+          oasdiff --version
+
+      - name: Run oasdiff
+        id: oasdiff
+        run: |
+          # Machine-readable findings for the evaluation pipeline.
+          oasdiff breaking openapi-base.json openapi-head.json -f json > breaking.json
+          oasdiff changelog openapi-base.json openapi-head.json -f json > changelog.json
+          # Human-readable report.
+          oasdiff changelog openapi-base.json openapi-head.json -f markdown > changelog.md
+
+          err=$(jq '[.[] | select(.level == 3)] | length' breaking.json)
+          warn=$(jq '[.[] | select(.level == 2)] | length' breaking.json)
+          total=$(jq 'length' changelog.json)
+          echo "err=$err" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "<!-- oasdiff-report -->"
+            echo "## OpenAPI diff (oasdiff $OASDIFF_VERSION)"
+            echo
+            echo "Merge-base vs head of \`/api/swagger.json\`: **$err breaking (ERR)**, **$warn possibly breaking (WARN)**, $total changes in total."
+            echo
+            if [ "$total" -eq 0 ]; then echo "_No API changes detected._"; else cat changelog.md; fi
+          } > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oasdiff-findings
+          path: |
+            breaking.json
+            changelog.json
+            changelog.md
+            openapi-base.json
+            openapi-head.json
+
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Update our previous comment if present, otherwise create one.
+          id=$(gh api "repos/$GH_REPO/issues/$PR/comments" --paginate \
+            -q '.[] | select(.body | startswith("<!-- oasdiff-report -->")) | .id' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" -F body=@report.md >/dev/null
+          else
+            gh pr comment "$PR" --body-file report.md
+          fi
+
+      - name: Fail on breaking changes
+        if: steps.oasdiff.outputs.err != '0'
+        run: |
+          echo "::error::oasdiff found ${{ steps.oasdiff.outputs.err }} breaking change(s). See the job summary."
+          exit 1
