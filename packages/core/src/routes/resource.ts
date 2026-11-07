@@ -52,15 +52,13 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
     async (ctx, next) => {
       const { limit, offset, disabled } = ctx.pagination;
       const {
-        query: { includeScopes, excludeManagementApis },
+        query: { excludeManagementApis },
       } = ctx.guard;
       const shouldExcludeManagementApis = yes(excludeManagementApis);
 
       if (disabled) {
         const resources = await findAllResources(shouldExcludeManagementApis);
-        ctx.body = yes(includeScopes)
-          ? await attachScopesToResources(resources, scopeQueries)
-          : resources;
+        ctx.body = await attachScopesToResources(resources, scopeQueries);
 
         return next();
       }
@@ -71,9 +69,7 @@ export default function resourceRoutes<T extends ManagementApiRouter>(
       ]);
 
       ctx.pagination.totalCount = count;
-      ctx.body = yes(includeScopes)
-        ? await attachScopesToResources(resources, scopeQueries)
-        : resources;
+      ctx.body = await attachScopesToResources(resources, scopeQueries);
 
       return next();
     }
